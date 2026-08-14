@@ -5,7 +5,7 @@
   "author": "loser1727",
   "license": "MIT",
   "pi": {
-    "extensions": ["./extensions"]
+    "extensions": ["./extensions/vision-tool.ts"]
   },
   "keywords": ["pi", "pi-extension", "vision", "locate", "image", "automation", "screenshot"]
 }
