@@ -642,6 +642,7 @@ async function refineLocate(
         finePrompt,
         signal,
         reasoningLevel,
+        true, // 精定位也是定位流程, 强制禁用思考
       );
 
       // 5) 解析局部坐标并映射回物理坐标
@@ -812,6 +813,7 @@ async function callVisionModel(
   prompt: string,
   signal: AbortSignal | undefined,
   reasoningLevel: ReasoningLevel,
+  forceNoThinking = false,
 ): Promise<string> {
   const baseUrl = visionModel.baseUrl.replace(/\/+$/, "");
 
@@ -837,8 +839,10 @@ async function callVisionModel(
     },
   ];
 
+  // locate 模式强制禁用思考(保速度); 描述模式由 config.thinkingDisabled 决定
+  const noThinking = forceNoThinking || config.thinkingDisabled;
   // 禁用思考时不再发送 reasoning 参数(避免与 thinking:disabled 冲突,豆包等模型会报错)
-  const reasoningParams = config.thinkingDisabled
+  const reasoningParams = noThinking
     ? undefined
     : buildReasoningParams(visionModel, reasoningLevel);
 
@@ -853,7 +857,7 @@ async function callVisionModel(
     Object.assign(body, reasoningParams);
   }
   // 兼容任意视觉 API: 需要时显式禁用思考(豆包等默认带思考极慢); extraBody 兜底自定义参数
-  if (config.thinkingDisabled) {
+  if (noThinking) {
     body.thinking = { type: "disabled" };
   }
   if (config.extraBody && typeof config.extraBody === "object") {
@@ -1399,6 +1403,7 @@ export default function visionToolExtension(pi: ExtensionAPI) {
           effectivePrompt,
           signal,
           reasoningLevel,
+          locate, // locate 模式强制禁用思考(豆包等思考会慢 10 倍)
         );
 
         let finalText = result;
