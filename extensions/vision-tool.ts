@@ -638,7 +638,7 @@ async function refineLocate(
 
       // 4) 请求精定位
       const targetDesc = t.desc
-        ? `目标描述：${t.desc}（用户问题中的元素）`
+        ? `${t.desc}`
         : `上一步定位到的元素"${t.name}"`;
       const finePrompt =
         `[精确定位] 这张图是原截图局部区域的 ${zoom}× 放大图，原始区域 x∈[${x1},${x2}] y∈[${y1},${y2}]。\n` +
@@ -1477,8 +1477,8 @@ export default function visionToolExtension(pi: ExtensionAPI) {
                 if (p.name === "TL" || p.name === "TR" || p.name === "BL" || p.name === "BR") continue;
                 if (!aff) continue;
                 const r = toReal(aff, (p.x1 + (p.x2 ?? p.x1)) / 2, (p.y1 + (p.y2 ?? p.y1)) / 2);
-                // 缩放后的坐标映射回原图物理像素
-                targets.push({ name: p.name, cx: Math.round(r.x * calibInfo.scaleX), cy: Math.round(r.y * calibInfo.scaleY) });
+                // 缩放后的坐标映射回原图物理像素; desc 传用户原始描述供精定位理解目标
+                targets.push({ name: p.name, cx: Math.round(r.x * calibInfo.scaleX), cy: Math.round(r.y * calibInfo.scaleY), desc: params.prompt });
               }
               if (targets.length > 0) {
                 const fine = await refineLocate(
