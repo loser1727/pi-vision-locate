@@ -446,6 +446,14 @@ function extractPointLines(text: string): ExtractedPoint[] {
       y2: m[5] !== undefined ? Number(m[5]) : undefined,
     });
   }
+  // 兼容自由坐标格式(如智谱 GLM-4V-Flash 的 "x=420, y=150" / "x:420 y:150")
+  if (!out.some((p) => p.name === "目标" || p.name === "Target")) {
+    const re2 = /x\s*[:=＝]\s*(\d{1,5})[^\d]{1,12}?y\s*[:=＝]\s*(\d{1,5})/gi;
+    let m2: RegExpExecArray | null;
+    while ((m2 = re2.exec(text)) !== null) {
+      out.push({ name: "目标", x1: Number(m2[1]), y1: Number(m2[2]), x2: undefined, y2: undefined });
+    }
+  }
   return out;
 }
 

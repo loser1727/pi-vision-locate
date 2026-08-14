@@ -10,6 +10,15 @@ function extractPointLines(text) {
   while ((m = re.exec(text)) !== null) {
     out.push({ name: m[1], x1: Number(m[2]), y1: Number(m[3]), x2: m[4] !== undefined ? Number(m[4]) : undefined, y2: m[5] !== undefined ? Number(m[5]) : undefined });
   }
+  // 兼容自由坐标格式(如智谱 GLM-4V-Flash 的 "x=420, y=150" / "x:420 y:150")
+  // 不管十字是否已解析,都尝试解析目标(十字标准格式+目标自由格式的混合情况)
+  if (!out.some((p) => p.name === "目标" || p.name === "Target")) {
+    const re2 = /x[ \t]*[:=＝][ \t]*(\d{1,5})[^\d]{1,12}?y[ \t]*[:=＝][ \t]*(\d{1,5})/gi;
+    let m2;
+    while ((m2 = re2.exec(text)) !== null) {
+      out.push({ name: "目标", x1: Number(m2[1]), y1: Number(m2[2]), x2: undefined, y2: undefined });
+    }
+  }
   return out;
 }
 function fitAffine(calib, marks) {
@@ -73,7 +82,6 @@ function check(name, cond, detail = "") {
 }
 // T2: 仿射校准 (模型空间 1000x1000 假设 vs 真实 1024x460 图)
 {
-  // 模拟模型输出: 图是 1024x460, 四角十字在 (40,40)(984,40)(40,420)(984,420)
   const marks = calibMarksFor(1024, 460);
   const text = `TL: 40,40 TR: 984,40 BL: 40,420 BR: 984,420 目标: 500,230`;
   const report = buildLocateReport(text, 1024, 460, marks);
@@ -85,7 +93,6 @@ function check(name, cond, detail = "") {
   const width = maxW, height = Math.round(origH * (maxW / origW));
   const scaleX = origW / width, scaleY = origH / height;
   const marks = calibMarksFor(width, height);
-  // 模型报: 目标中心在缩放图 (500,230) → 换算回原图应 ≈ (1172, 539)
   const text = `TL: 40,40 TR: 984,40 BL: 40,420 BR: 984,420 目标: 500,230`;
   const report = buildLocateReport(text, width, height, marks, scaleX, scaleY);
   const m = report.match(/目标: \((\d+),(\d+)\)/);
@@ -106,7 +113,6 @@ function check(name, cond, detail = "") {
 }
 // T6: 精定位坐标映射 (refineLocate 的局部→物理换算逻辑)
 {
-  // 局部裁剪 320x240 放大3x → 960x720; 十字已知 (30,30)(930,30)(30,690)(930,690)
   const cw = 320, ch = 240, zoom = 3, inset = 30;
   const zw = cw * zoom, zh = ch * zoom;
   const marks = [
@@ -120,10 +126,19 @@ function check(name, cond, detail = "") {
   const aff = fitAffine(calib, marks);
   const t = pts.find(p => p.name === "目标");
   const r = toReal(aff, t.x1, t.y1);
-  // 局部坐标 → 原图: x1 + r.x/zoom
-  const x1 = 100, y1 = 200; // 模拟裁剪起点
+  const x1 = 100, y1 = 200;
   const physX = Math.round(x1 + r.x / zoom), physY = Math.round(y1 + r.y / zoom);
   check("T6 精定位仿射+映射", aff !== null && physX === 260 && physY === 320, `${physX},${physY} 期望 260,320`);
+}
+// T7: 智谱自由坐标格式兼容(十字标准格式 + 目标自由格式混合)
+{
+  const pts = extractPointLines("TL: 40,40 TR: 984,40 BL: 40,421 BR: 984,421 底部白色输入框的中心位置为：x=580, y=240");
+  check("T7 智谱自由格式解析(混合格式)", pts.length === 5 && pts[4].name === "目标" && pts[4].x1 === 580 && pts[4].y1 === 240, JSON.stringify(pts));
+}
+// T8: 纯自由格式(无十字)
+{
+  const pts = extractPointLines("The center of the red rectangle is at coordinates x = 420, y = 150");
+  check("T8 纯自由格式", pts.length === 1 && pts[0].name === "目标" && pts[0].x1 === 420 && pts[0].y1 === 150, JSON.stringify(pts));
 }
 
 console.log(`\n结果: ${pass} 通过, ${fail} 失败`);
