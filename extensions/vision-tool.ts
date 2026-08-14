@@ -641,37 +641,45 @@ async function refineLocate(
         ? `目标描述：${t.desc}（用户问题中的元素）`
         : `上一步定位到的元素"${t.name}"`;
       const finePrompt =
-        `[精确定位] 这张图是原截图局部区域的 4× 放大图，原始区域 x∈[${x1},${x2}] y∈[${y1},${y2}]。\n` +
+        `[精确定位] 这张图是原截图局部区域的 ${zoom}× 放大图，原始区域 x∈[${x1},${x2}] y∈[${y1},${y2}]。\n` +
         `图四角有4个红色十字校准点：TL/TR/BL/BR（局部坐标：TL(${inset},${inset}) TR(${zw - inset},${inset}) BL(${inset},${zh - inset}) BR(${zw - inset},${zh - inset})）。\n` +
-        `请先输出：TL: x,y / TR: x,y / BL: x,y / BR: x,y\n` +
-        `然后精确定位${targetDesc}的中心点，输出：${t.name}: x,y\n` +
+        `请先输出：TL: x,y / TR: x,y / BL: x,y / BR: x,y（每个一行）\n` +
+        `然后精确定位${targetDesc}的中心点。\n` +
+        `最后一行必须严格输出：${t.name}: 中心x,中心y（只输出这一行坐标，不要解释）\n` +
         `坐标必须是本图（${zw}×${zh}）内的像素坐标。`;
 
-      const fineResult = await callVisionModel(
-        visionModel,
-        apiKey,
-        marked.toString("base64"),
-        "image/jpeg",
-        finePrompt,
-        signal,
-        reasoningLevel,
-        true, // 精定位也是定位流程, 强制禁用思考
-      );
-
-      // 5) 解析局部坐标并映射回物理坐标
-      const pts = extractPointLines(fineResult);
-      const calib = new Map<string, { x: number; y: number }>();
-      for (const p of pts) {
-        if (p.name === "TL" || p.name === "TR" || p.name === "BL" || p.name === "BR") {
-          calib.set(p.name, { x: (p.x1 + (p.x2 ?? p.x1)) / 2, y: (p.y1 + (p.y2 ?? p.y1)) / 2 });
+      // 精定位调用(失败时重试一次: 模型输出有随机性)
+      let fineResult = "";
+      let pts: ExtractedPoint[] = [];
+      let aff: Affine | null = null;
+      let target: ExtractedPoint | undefined;
+      for (let attempt = 0; attempt < 2; attempt++) {
+        fineResult = await callVisionModel(
+          visionModel,
+          apiKey,
+          marked.toString("base64"),
+          "image/jpeg",
+          finePrompt,
+          signal,
+          reasoningLevel,
+          true, // 精定位也是定位流程, 强制禁用思考
+        );
+        // 5) 解析局部坐标并映射回物理坐标
+        pts = extractPointLines(fineResult);
+        const calib = new Map<string, { x: number; y: number }>();
+        for (const p of pts) {
+          if (p.name === "TL" || p.name === "TR" || p.name === "BL" || p.name === "BR") {
+            calib.set(p.name, { x: (p.x1 + (p.x2 ?? p.x1)) / 2, y: (p.y1 + (p.y2 ?? p.y1)) / 2 });
+          }
         }
+        aff = fitAffine(calib, marks as any);
+        // 目标匹配放宽: 精确点名 → "目标" → 任意非十字点(兼容智谱等模型输出不同点名/自由格式)
+        target =
+          pts.find((p) => p.name === t.name) ||
+          pts.find((p) => p.name === "目标") ||
+          pts.find((p) => !["TL", "TR", "BL", "BR"].includes(p.name));
+        if (aff && target) break; // 成功
       }
-      const aff = fitAffine(calib, marks as any);
-      // 目标匹配放宽: 精确点名 → "目标" → 任意非十字点(兼容智谱等模型输出不同点名/自由格式)
-      const target =
-        pts.find((p) => p.name === t.name) ||
-        pts.find((p) => p.name === "目标") ||
-        pts.find((p) => !["TL", "TR", "BL", "BR"].includes(p.name));
       if (!aff || !target) {
         lines.push(`${t.name}: 精定位失败（模型未返回可解析坐标）`);
         continue;
