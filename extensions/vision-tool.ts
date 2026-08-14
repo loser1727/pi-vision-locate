@@ -106,6 +106,8 @@ interface VisionConfig {
   fineCropWidth: number;
   fineCropHeight: number;
   fineZoom: number;
+  /** 阶梯式备用视觉模型: 主模型调用失败时按顺序尝试 [{provider, model}, ...] */
+  fallbackModels: { provider: string; model: string }[];
 }
 
 let config: VisionConfig = {
@@ -119,6 +121,7 @@ let config: VisionConfig = {
   fineCropWidth: 320,
   fineCropHeight: 240,
   fineZoom: 3,
+  fallbackModels: [],
 };
 
 const VISION_SYSTEM_PROMPT = [
@@ -156,6 +159,7 @@ function loadConfigFile(): VisionConfig | null {
       fineCropWidth: raw.fineCropWidth ?? config.fineCropWidth,
       fineCropHeight: raw.fineCropHeight ?? config.fineCropHeight,
       fineZoom: raw.fineZoom ?? config.fineZoom,
+      fallbackModels: Array.isArray(raw.fallbackModels) ? raw.fallbackModels : config.fallbackModels,
     };
   } catch {
     return null;
@@ -213,6 +217,7 @@ function resolveConfig(): VisionConfig {
     fineCropWidth: fileCfg?.fineCropWidth ?? config.fineCropWidth,
     fineCropHeight: fileCfg?.fineCropHeight ?? config.fineCropHeight,
     fineZoom: fileCfg?.fineZoom ?? config.fineZoom,
+    fallbackModels: fileCfg?.fallbackModels ?? config.fallbackModels,
   };
 }
 
@@ -917,6 +922,7 @@ export default function visionToolExtension(pi: ExtensionAPI) {
         if (data?.fineCropWidth !== undefined) config.fineCropWidth = data.fineCropWidth;
         if (data?.fineCropHeight !== undefined) config.fineCropHeight = data.fineCropHeight;
         if (data?.fineZoom !== undefined) config.fineZoom = data.fineZoom;
+        if (data?.fallbackModels !== undefined) config.fallbackModels = data.fallbackModels;
       }
     }
 
@@ -1266,42 +1272,39 @@ export default function visionToolExtension(pi: ExtensionAPI) {
         };
       }
 
-      // Resolve the vision model from the registry
-      const visionModel = ctx.modelRegistry.find(config.provider!, config.model!);
-      if (!visionModel) {
+      // 阶梯式模型候选: 主模型 + fallbackModels(按顺序; 跳过重复/无效项)
+      const candidates: { provider: string; model: string; visionModel: any; apiKey?: string; err?: string }[] = [];
+      const seen = new Set<string>();
+      const allCands: { provider?: string; model?: string }[] = [
+        { provider: config.provider, model: config.model },
+        ...(config.fallbackModels || []),
+      ];
+      for (const c of allCands) {
+        const key = `${c.provider}/${c.model}`;
+        if (!c.provider || !c.model || seen.has(key)) continue;
+        seen.add(key);
+        const vm = ctx.modelRegistry.find(c.provider, c.model);
+        if (!vm) {
+          candidates.push({ provider: c.provider, model: c.model, visionModel: null as any, err: `model "${key}" not found in model registry` });
+          continue;
+        }
+        const auth = await ctx.modelRegistry.getApiKeyAndHeaders(vm);
+        if (!auth.ok) {
+          candidates.push({ provider: c.provider, model: c.model, visionModel: vm, err: `unable to resolve API key: ${auth.error}` });
+          continue;
+        }
+        candidates.push({ provider: c.provider, model: c.model, visionModel: vm, apiKey: auth.apiKey });
+      }
+      if (candidates.length === 0) {
         return {
-          content: [
-            {
-              type: "text",
-              text: [
-                `Vision tool error: model "${config.provider}/${config.model}" not found in model registry.`,
-                "",
-                "Make sure:",
-                "1. The provider and model are defined in ~/.pi/agent/models.json",
-                '2. The model has `input: ["text", "image"]`',
-                "3. Use /vision show to check or /vision config to update the configuration",
-              ].join("\n"),
-            },
-          ],
-          details: { error: "model_not_found" },
+          content: [{ type: "text", text: "Vision tool error: 未配置任何视觉模型。请先设置 provider/model 或配置 fallbackModels。" }],
+          details: { error: "not_configured" },
           isError: true,
         };
       }
-
-      // Resolve API key
-      const auth = await ctx.modelRegistry.getApiKeyAndHeaders(visionModel);
-      if (!auth.ok) {
-        return {
-          content: [
-            {
-              type: "text",
-              text: `Vision tool error: unable to resolve API key for "${config.provider}". ${auth.error}`,
-            },
-          ],
-          details: { error: "auth_error", authError: auth.error },
-          isError: true,
-        };
-      }
+      // 第一个就绪的候选(主模型优先)
+      const activeCandidate = candidates.find((c) => c.visionModel && c.apiKey) || candidates[0];
+      const activeVisionModel = activeCandidate.visionModel;
 
       // Decode the image
       const compress = params.compress;
@@ -1360,7 +1363,7 @@ export default function visionToolExtension(pi: ExtensionAPI) {
         : `raw (${(imageData.data.length / 1024).toFixed(0)}KB base64)`;
 
       const reasoningLabel =
-        visionModel.reasoning && reasoningLevel !== "off"
+        activeVisionModel?.reasoning && reasoningLevel !== "off"
           ? `, reasoning: ${reasoningLevel}`
           : "";
 
@@ -1393,18 +1396,46 @@ export default function visionToolExtension(pi: ExtensionAPI) {
         spinnerTimer = setInterval(updateSpinner, 200);
       }
 
-      // Call the vision model
+      // Call the vision model (阶梯式: 主模型失败自动切换 fallbackModels)
       try {
-        const result = await callVisionModel(
-          visionModel,
-          auth.apiKey,
-          imageData.data,
-          imageData.mimeType,
-          effectivePrompt,
-          signal,
-          reasoningLevel,
-          locate, // locate 模式强制禁用思考(豆包等思考会慢 10 倍)
-        );
+        let result: string | null = null;
+        let usedVisionModel: any = null;
+        let usedApiKey = "";
+        let lastErr: string | null = null;
+        for (const cand of candidates) {
+          if (!cand.visionModel || !cand.apiKey) { lastErr = cand.err || "未就绪"; continue; }
+          try {
+            result = await callVisionModel(
+              cand.visionModel,
+              cand.apiKey,
+              imageData.data,
+              imageData.mimeType,
+              effectivePrompt,
+              signal,
+              reasoningLevel,
+              locate, // locate 模式强制禁用思考(豆包等思考会慢 10 倍)
+            );
+            usedVisionModel = cand.visionModel;
+            usedApiKey = cand.apiKey;
+            if (usedVisionModel.id !== config.model) {
+              // 通知模型发生了阶梯切换
+              onUpdate?.({
+                content: [{ type: "text", text: `主模型 ${config.model} 失败,已自动切换到 ${cand.provider}/${cand.model} ✓` }],
+                details: { fallback_used: `${cand.provider}/${cand.model}` },
+              });
+            }
+            break;
+          } catch (e) {
+            lastErr = `${cand.provider}/${cand.model}: ${e instanceof Error ? e.message : String(e)}`;
+          }
+        }
+        if (result === null) {
+          return {
+            content: [{ type: "text", text: `Vision tool error: 所有视觉模型均失败。${lastErr}` }],
+            details: { error: "vision_call_error" },
+            isError: true,
+          };
+        }
 
         let finalText = result;
         if (locate && calibInfo) {
@@ -1433,8 +1464,8 @@ export default function visionToolExtension(pi: ExtensionAPI) {
                 const fine = await refineLocate(
                   rawBuf,
                   targets,
-                  visionModel,
-                  auth.apiKey ?? "",
+                  usedVisionModel,
+                  usedApiKey ?? "",
                   signal,
                   reasoningLevel,
                   params.prompt ?? "",

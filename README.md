@@ -72,12 +72,33 @@ pi install npm:pi-vision-locate
   "extraBody": {},                 // 附加请求参数,任意 API 特殊参数兜底(如 {"enable_thinking": false})
   "fineCropWidth": 320,            // 精定位裁剪尺寸
   "fineCropHeight": 240,
-  "fineZoom": 3
+  "fineZoom": 3,
+  "fallbackModels": [              // 🎯 阶梯式备用模型: 主模型调用失败自动切换
+    { "provider": "zhipu-vision", "model": "glm-4v-flash" }
+  ]
 }
 ```
 
 > **换模型**：改 `model` 一行即可；换 API 网关改 `models.json` 的 `baseUrl/apiKey`，配合 `extraBody`/`thinkingDisabled` 适配任何 OpenAI 兼容端点。
 > 实测：豆包 `doubao-seed-2-1-turbo` 默认带思考，全屏 locate 需 40s~240s；开启 `thinkingDisabled` 后 **~5s** 完成，精度不变。
+
+### 🎯 阶梯式多模型自动切换（fallback）
+
+主模型调用失败（HTTP 错误/超时/限流/空响应）时，自动按 `fallbackModels` 顺序尝试下一个模型，全部失败才报错。
+
+```jsonc
+// vision-tool.json
+{
+  "provider": "ark-vision",
+  "model": "doubao-seed-2-1-turbo-260628",
+  "fallbackModels": [
+    { "provider": "zhipu-vision", "model": "glm-4v-flash" },   // 智谱免费视觉
+    { "provider": "another-provider", "model": "another-model" }
+  ]
+}
+```
+
+`fallbackModels` 中每个条目对应 `models.json` 里注册的 provider/model（需配置 `input: ["text","image"]`）。切换发生时工具输出会提示 `主模型 xxx 失败,已自动切换到 yyy ✓`。
 
 ## 💡 使用
 

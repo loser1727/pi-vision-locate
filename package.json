@@ -1,11 +1,21 @@
 {
   "name": "pi-vision-locate",
-  "version": "1.1.0",
-  "description": "Pi Coding Agent extension: image description + 3-stage fine locate (clickable pixel coordinates, ±1-5px). Enhanced from pi-vision-tool with locate V2 multi-stage calibration.",
+  "version": "1.2.0",
+  "description": "Pi Coding Agent extension: image description + 3-stage fine locate (clickable pixel coordinates, ±1-5px). Enhanced from pi-vision-tool with locate V2 multi-stage calibration + 阶梯式多模型自动切换.",
   "author": "loser1727",
   "license": "MIT",
   "pi": {
-    "extensions": ["./extensions/vision-tool.ts"]
+    "extensions": [
+      "./extensions/vision-tool.ts"
+    ]
   },
-  "keywords": ["pi", "pi-extension", "vision", "locate", "image", "automation", "screenshot"]
+  "keywords": [
+    "pi",
+    "pi-extension",
+    "vision",
+    "locate",
+    "image",
+    "automation",
+    "screenshot"
+  ]
 }
