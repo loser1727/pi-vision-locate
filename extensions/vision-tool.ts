@@ -667,7 +667,11 @@ async function refineLocate(
         }
       }
       const aff = fitAffine(calib, marks as any);
-      const target = pts.find((p) => p.name === t.name);
+      // 目标匹配放宽: 精确点名 → "目标" → 任意非十字点(兼容智谱等模型输出不同点名/自由格式)
+      const target =
+        pts.find((p) => p.name === t.name) ||
+        pts.find((p) => p.name === "目标") ||
+        pts.find((p) => !["TL", "TR", "BL", "BR"].includes(p.name));
       if (!aff || !target) {
         lines.push(`${t.name}: 精定位失败（模型未返回可解析坐标）`);
         continue;

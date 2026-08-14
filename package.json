@@ -17,5 +17,8 @@
     "image",
     "automation",
     "screenshot"
-  ]
+  ],
+  "dependencies": {
+    "sharp": "^0.33.0"
+  }
 }
