@@ -96,6 +96,16 @@ interface VisionConfig {
   jpegQuality: number;
   defaultReasoningEffort: ReasoningLevel;
   enabled: boolean;
+  /** locate 模式粗定位输入图最大宽度(越小越快,默认1024) */
+  locateMaxWidth: number;
+  /** 禁用模型思考(发送 {"thinking":{"type":"disabled"}}),豆包等默认带思考的模型必须开启才快 */
+  thinkingDisabled: boolean;
+  /** 附加请求参数,任意 OpenAI 兼容 API 的特殊参数兜底(如 {"enable_thinking":false}) */
+  extraBody: Record<string, unknown>;
+  /** 精定位裁剪尺寸与放大倍数 */
+  fineCropWidth: number;
+  fineCropHeight: number;
+  fineZoom: number;
 }
 
 let config: VisionConfig = {
@@ -103,6 +113,12 @@ let config: VisionConfig = {
   jpegQuality: parseInt(process.env.PI_VISION_JPEG_QUALITY ?? "85", 10),
   defaultReasoningEffort: "off",
   enabled: true,
+  locateMaxWidth: 1024,
+  thinkingDisabled: false,
+  extraBody: {},
+  fineCropWidth: 320,
+  fineCropHeight: 240,
+  fineZoom: 3,
 };
 
 const VISION_SYSTEM_PROMPT = [
@@ -134,6 +150,12 @@ function loadConfigFile(): VisionConfig | null {
       jpegQuality: raw.jpegQuality ?? config.jpegQuality,
       defaultReasoningEffort: validateReasoningLevel(raw.defaultReasoningEffort) ?? config.defaultReasoningEffort,
       enabled: raw.enabled !== false,
+      locateMaxWidth: raw.locateMaxWidth ?? config.locateMaxWidth,
+      thinkingDisabled: raw.thinkingDisabled ?? config.thinkingDisabled,
+      extraBody: raw.extraBody ?? config.extraBody,
+      fineCropWidth: raw.fineCropWidth ?? config.fineCropWidth,
+      fineCropHeight: raw.fineCropHeight ?? config.fineCropHeight,
+      fineZoom: raw.fineZoom ?? config.fineZoom,
     };
   } catch {
     return null;
@@ -185,6 +207,12 @@ function resolveConfig(): VisionConfig {
     defaultReasoningEffort:
       fileCfg?.defaultReasoningEffort ?? envReasoning ?? "off",
     enabled: fileCfg?.enabled !== false,
+    locateMaxWidth: fileCfg?.locateMaxWidth ?? config.locateMaxWidth,
+    thinkingDisabled: fileCfg?.thinkingDisabled ?? config.thinkingDisabled,
+    extraBody: fileCfg?.extraBody ?? config.extraBody,
+    fineCropWidth: fileCfg?.fineCropWidth ?? config.fineCropWidth,
+    fineCropHeight: fileCfg?.fineCropHeight ?? config.fineCropHeight,
+    fineZoom: fileCfg?.fineZoom ?? config.fineZoom,
   };
 }
 
@@ -326,16 +354,31 @@ function getImageSize(buf: Buffer): { width: number; height: number } | null {
  * return the marked image + original dimensions. JPEG-encodes the result
  * (pixel grid is unchanged, so coordinates stay valid). Returns null when
  * sharp is unavailable.
+ *
+ * Optionally downscales to `maxWidth` (locate 粗定位提速: 大图会让视觉模型思考极慢),
+ * 并返回 scaleX/scaleY 供坐标映射回原图。
  */
 async function addCalibrationMarks(
   buffer: Buffer,
-): Promise<{ buffer: Buffer; width: number; height: number; marks: CalibMark[] } | null> {
+  maxWidth?: number,
+): Promise<{ buffer: Buffer; width: number; height: number; marks: CalibMark[]; scaleX: number; scaleY: number } | null> {
   try {
     const sharp = (await import("sharp")).default;
     const meta = await sharp(buffer).metadata();
-    const width = meta.width ?? 0;
-    const height = meta.height ?? 0;
-    if (!width || !height) return null;
+    const origW = meta.width ?? 0;
+    const origH = meta.height ?? 0;
+    if (!origW || !origH) return null;
+
+    let width = origW;
+    let height = origH;
+    let scaleX = 1;
+    let scaleY = 1;
+    if (maxWidth && maxWidth > 0 && origW > maxWidth) {
+      width = maxWidth;
+      height = Math.round(origH * (maxWidth / origW));
+      scaleX = origW / width;
+      scaleY = origH / height;
+    }
 
     const half = 14; // cross half-length
     const marks = calibMarksFor(width, height);
@@ -349,10 +392,11 @@ async function addCalibrationMarks(
     const svg = `<svg width="${width}" height="${height}" xmlns="http://www.w3.org/2000/svg">${crosses}</svg>`;
 
     const out = await sharp(buffer)
+      .resize(width, height, { kernel: "lanczos3" })
       .composite([{ input: Buffer.from(svg), top: 0, left: 0 }])
       .jpeg({ quality: 90 })
       .toBuffer();
-    return { buffer: out, width, height, marks };
+    return { buffer: out, width, height, marks, scaleX, scaleY };
   } catch {
     return null;
   }
@@ -459,6 +503,8 @@ function buildLocateReport(
   width: number,
   height: number,
   marks: CalibMark[],
+  scaleX = 1,
+  scaleY = 1,
 ): string {
   const points = extractPointLines(modelText);
   const calib = new Map<string, { x: number; y: number }>();
@@ -479,12 +525,18 @@ function buildLocateReport(
   const rows: string[] = [];
   for (const p of points) {
     if (p.name === "TL" || p.name === "TR" || p.name === "BL" || p.name === "BR") continue;
-    const rx1 = toReal(affine, p.x1, p.y1);
-    const rx2 = p.x2 !== undefined ? toReal(affine, p.x2, p.y2!) : undefined;
+    const r1 = toReal(affine, p.x1, p.y1);
+    const rx1 = { x: Math.round(r1.x * scaleX), y: Math.round(r1.y * scaleY) };
+    const rx2 = p.x2 !== undefined
+      ? (() => {
+          const r2 = toReal(affine, p.x2!, p.y2!);
+          return { x: Math.round(r2.x * scaleX), y: Math.round(r2.y * scaleY) };
+        })()
+      : undefined;
     rows.push(
       rx2
-        ? `${p.name}: (${Math.round(rx1.x)},${Math.round(rx1.y)},${Math.round(rx2.x)},${Math.round(rx2.y)})`
-        : `${p.name}: (${Math.round(rx1.x)},${Math.round(rx1.y)})`,
+        ? `${p.name}: (${rx1.x},${rx1.y},${rx2.x},${rx2.y})`
+        : `${p.name}: (${rx1.x},${rx1.y})`,
     );
   }
 
@@ -532,9 +584,9 @@ async function refineLocate(
 
   const lines: string[] = [];
   for (const t of targets) {
-    // 1) 裁剪区域（原图物理坐标）
-    const cw = Math.min(360, W);
-    const ch = Math.min(280, H);
+    // 1) 裁剪区域（原图物理坐标）; 尺寸可配置(locateMaxWidth 提速场景下适当调小)
+    const cw = Math.min(config.fineCropWidth, W);
+    const ch = Math.min(config.fineCropHeight, H);
     let x1 = Math.round(t.cx - cw / 2);
     let y1 = Math.round(t.cy - ch / 2);
     x1 = Math.max(0, Math.min(W - cw, x1));
@@ -543,8 +595,8 @@ async function refineLocate(
     const y2 = y1 + ch;
 
     try {
-      // 2) 裁剪并放大 4×
-      const zoom = 4;
+      // 2) 裁剪并放大 (zoom 可配置, 默认 3×)
+      const zoom = config.fineZoom;
       const cropped = await sharp(rawBuffer)
         .extract({ left: x1, top: y1, width: cw, height: ch })
         .resize(cw * zoom, ch * zoom, { kernel: "lanczos3" })
@@ -785,7 +837,10 @@ async function callVisionModel(
     },
   ];
 
-  const reasoningParams = buildReasoningParams(visionModel, reasoningLevel);
+  // 禁用思考时不再发送 reasoning 参数(避免与 thinking:disabled 冲突,豆包等模型会报错)
+  const reasoningParams = config.thinkingDisabled
+    ? undefined
+    : buildReasoningParams(visionModel, reasoningLevel);
 
   const body: Record<string, unknown> = {
     model: visionModel.id,
@@ -796,6 +851,13 @@ async function callVisionModel(
 
   if (reasoningParams) {
     Object.assign(body, reasoningParams);
+  }
+  // 兼容任意视觉 API: 需要时显式禁用思考(豆包等默认带思考极慢); extraBody 兜底自定义参数
+  if (config.thinkingDisabled) {
+    body.thinking = { type: "disabled" };
+  }
+  if (config.extraBody && typeof config.extraBody === "object") {
+    Object.assign(body, config.extraBody);
   }
 
   const response = await fetch(`${baseUrl}/chat/completions`, {
@@ -845,6 +907,12 @@ export default function visionToolExtension(pi: ExtensionAPI) {
         if (data?.jpegQuality !== undefined) config.jpegQuality = data.jpegQuality;
         if (data?.defaultReasoningEffort !== undefined) config.defaultReasoningEffort = data.defaultReasoningEffort;
         if (data?.enabled !== undefined) config.enabled = data.enabled;
+        if (data?.locateMaxWidth !== undefined) config.locateMaxWidth = data.locateMaxWidth;
+        if (data?.thinkingDisabled !== undefined) config.thinkingDisabled = data.thinkingDisabled;
+        if (data?.extraBody !== undefined) config.extraBody = data.extraBody;
+        if (data?.fineCropWidth !== undefined) config.fineCropWidth = data.fineCropWidth;
+        if (data?.fineCropHeight !== undefined) config.fineCropHeight = data.fineCropHeight;
+        if (data?.fineZoom !== undefined) config.fineZoom = data.fineZoom;
       }
     }
 
@@ -1235,7 +1303,7 @@ export default function visionToolExtension(pi: ExtensionAPI) {
       const compress = params.compress;
       const locate = (params as any).locate === true;
       let imageData: { mimeType: string; data: string };
-      let calibInfo: { width: number; height: number; marks: CalibMark[] } | null = null;
+      let calibInfo: { width: number; height: number; marks: CalibMark[]; scaleX: number; scaleY: number } | null = null;
       let rawBuffer: Buffer | null = null;
       let effectivePrompt = params.prompt;
       try {
@@ -1243,17 +1311,17 @@ export default function visionToolExtension(pi: ExtensionAPI) {
           // locate mode: need the raw image (no resize) to draw calibration marks
           const raw = await imageToBase64(params.image_path, false);
           rawBuffer = Buffer.from(raw.data, "base64");
-          const marked = await addCalibrationMarks(rawBuffer);
+          const marked = await addCalibrationMarks(rawBuffer, config.locateMaxWidth);
           if (marked) {
             imageData = { mimeType: "image/jpeg", data: marked.buffer.toString("base64") };
-            calibInfo = { width: marked.width, height: marked.height, marks: marked.marks };
+            calibInfo = { width: marked.width, height: marked.height, marks: marked.marks, scaleX: marked.scaleX, scaleY: marked.scaleY };
             effectivePrompt = buildCalibrationPrompt(params.prompt, marked.width, marked.height);
           } else {
             // sharp unavailable — fall back to assumed 1000×1000 space; still needs W/H
             imageData = raw;
             const dims = getImageSize(rawBuffer);
             if (dims) {
-              calibInfo = { width: dims.width, height: dims.height, marks: calibMarksFor(dims.width, dims.height) };
+              calibInfo = { width: dims.width, height: dims.height, marks: calibMarksFor(dims.width, dims.height), scaleX: 1, scaleY: 1 };
               effectivePrompt = buildCalibrationPrompt(params.prompt, dims.width, dims.height);
             }
           }
@@ -1300,6 +1368,11 @@ export default function visionToolExtension(pi: ExtensionAPI) {
             text: `Analyzing image with ${config.model} (${compressLabel}${reasoningLabel})...`,
           },
         ],
+        details: {
+          model: `${config.provider}/${config.model}`,
+          image_path: params.image_path,
+          compressed: compress,
+        },
       });
 
       // Animated spinner in the footer status line
@@ -1330,10 +1403,11 @@ export default function visionToolExtension(pi: ExtensionAPI) {
 
         let finalText = result;
         if (locate && calibInfo) {
-          const report = buildLocateReport(result, calibInfo.width, calibInfo.height, calibInfo.marks);
+          const report = buildLocateReport(result, calibInfo.width, calibInfo.height, calibInfo.marks, calibInfo.scaleX, calibInfo.scaleY);
           // V2: 多阶段精定位——把粗定位目标中心映射到物理坐标，再局部裁剪放大精确定位
           try {
             if (rawBuffer) {
+              const rawBuf = rawBuffer; // 捕获: await 后 let 的 narrowing 会失效
               const pts = extractPointLines(result);
               const calibMap = new Map<string, { x: number; y: number }>();
               for (const p of pts) {
@@ -1347,17 +1421,18 @@ export default function visionToolExtension(pi: ExtensionAPI) {
                 if (p.name === "TL" || p.name === "TR" || p.name === "BL" || p.name === "BR") continue;
                 if (!aff) continue;
                 const r = toReal(aff, (p.x1 + (p.x2 ?? p.x1)) / 2, (p.y1 + (p.y2 ?? p.y1)) / 2);
-                targets.push({ name: p.name, cx: r.x, cy: r.y });
+                // 缩放后的坐标映射回原图物理像素
+                targets.push({ name: p.name, cx: Math.round(r.x * calibInfo.scaleX), cy: Math.round(r.y * calibInfo.scaleY) });
               }
               if (targets.length > 0) {
                 const fine = await refineLocate(
-                  rawBuffer,
+                  rawBuf,
                   targets,
                   visionModel,
-                  auth.apiKey,
+                  auth.apiKey ?? "",
                   signal,
                   reasoningLevel,
-                  params.prompt,
+                  params.prompt ?? "",
                 );
                 finalText = report + "\n\n" + fine + "\n\n" + result;
               } else {

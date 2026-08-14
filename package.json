@@ -1,6 +1,6 @@
 {
   "name": "pi-vision-locate",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Pi Coding Agent extension: image description + 3-stage fine locate (clickable pixel coordinates, ±1-5px). Enhanced from pi-vision-tool with locate V2 multi-stage calibration.",
   "author": "loser1727",
   "license": "MIT",

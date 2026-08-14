@@ -60,6 +60,25 @@ pi install npm:pi-vision-locate
 
 （或写 `~/.pi/agent/vision-tool.json`：`{"provider": "...", "model": "...", "enabled": true}`）
 
+### 3. 进阶配置（vision-tool.json 可选字段）
+
+```jsonc
+{
+  "provider": "ark-vision",
+  "model": "doubao-seed-2-1-turbo-260628",
+  "enabled": true,
+  "locateMaxWidth": 1024,          // locate 模式粗定位图最大宽度(越小越快)
+  "thinkingDisabled": true,        // 发送 {"thinking":{"type":"disabled"}} —— 豆包等默认带思考的模型必须开,否则定位慢 10 倍
+  "extraBody": {},                 // 附加请求参数,任意 API 特殊参数兜底(如 {"enable_thinking": false})
+  "fineCropWidth": 320,            // 精定位裁剪尺寸
+  "fineCropHeight": 240,
+  "fineZoom": 3
+}
+```
+
+> **换模型**：改 `model` 一行即可；换 API 网关改 `models.json` 的 `baseUrl/apiKey`，配合 `extraBody`/`thinkingDisabled` 适配任何 OpenAI 兼容端点。
+> 实测：豆包 `doubao-seed-2-1-turbo` 默认带思考，全屏 locate 需 40s~240s；开启 `thinkingDisabled` 后 **~5s** 完成，精度不变。
+
 ## 💡 使用
 
 ### 普通识图
@@ -98,11 +117,11 @@ describe_image(
 
 ```
 ① 粗定位（全图）
-   截图 → 1600px 宽 → 四角画红色十字（坐标已知）
+   截图 → locateMaxWidth(1024px) 宽 → 四角画红色十字（坐标已知）
    → 模型报十字+目标位置 → 仿射变换（模型空间→物理空间）
    → 误差 ±50px
 
-② 细定位（裁剪 400×300，放大 4×）
+② 细定位（裁剪 320×240，放大 3×，可配置）
    以粗定位为中心裁剪 → 放大 → 局部十字校准 → 仿射反推
    → 误差 ±10px
 
@@ -138,7 +157,8 @@ pi-vision-locate/
 - 需要 `sharp`（图片裁剪/放大）：`npm install sharp`（pi 环境通常已带）
 - `locate: true` 会发起 **3 次**视觉 API 调用（粗/细/超细），比普通识图慢，但值得
 - 坐标基于**截图物理像素**；配合 DPI 100% 或按物理分辨率换算
-- 若视觉 API 不稳定，可在模型配置里选更稳的模型（实测 Gemini 3.5 Flash 定位最稳）
+- 定位模型推荐禁用思考（`thinkingDisabled: true`）；豆包/Gemini/GLM 等均可用 `extraBody` 适配特殊参数
+- 若视觉 API 不稳定，可在模型配置里选更稳的模型
 
 ## 📄 License
 
